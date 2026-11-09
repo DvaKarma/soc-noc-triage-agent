@@ -1,0 +1,37 @@
+image:
+  repository: ghcr.io/dvakarma/soc-noc-triage-agent
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+config:
+  LLM_PROVIDER: rule-based
+  LLM_MODEL: claude-sonnet-5-5
+  EMBEDDINGS_PROVIDER: hashing
+  EMBEDDINGS_DIM: "384"
+  MIN_CONFIDENCE: "0.55"
+
+# Name of an existing Secret with API_KEY, LLM_API_KEY, DATABASE_URL, TELEGRAM_* keys.
+# Create it out of band (External Secrets, Sealed Secrets, Infisical operator...).
+existingSecret: triage-agent-secrets
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: false
+  className: traefik
+  host: triage.example.com
+  tls: true
+
+resources:
+  requests: {cpu: 100m, memory: 192Mi}
+  limits: {cpu: 500m, memory: 512Mi}
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70

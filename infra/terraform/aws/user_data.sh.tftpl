@@ -1,0 +1,5 @@
+#!/bin/bash
+set -euo pipefail
+# Single-node k3s with Traefik ingress; Helm for the application chart.
+curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="${k3s_version}" sh -s - server --write-kubeconfig-mode 600
+curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash

@@ -1,0 +1,6 @@
+{
+  "rule": {"id": "60204", "level": 10, "description": "Multiple Windows logon failures", "groups": ["windows", "authentication_failures"]},
+  "agent": {"name": "srv-ad"},
+  "data": {"srcip": "185.220.0.10"},
+  "full_log": "Event 4625: An account failed to log on. Logon Type: 10. Source Network Address: 185.220.0.10"
+}

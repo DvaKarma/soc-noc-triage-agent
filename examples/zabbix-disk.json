@@ -1,0 +1,8 @@
+{
+  "host": "srv-files-01",
+  "trigger_name": "Free disk space is less than 5% on volume C:",
+  "severity": "High",
+  "opdata": "C: 3.1% free (4.2 GB of 136 GB)",
+  "item_key": "vfs.fs.size[C:,pfree]",
+  "tags": [{"tag": "scope", "value": "capacity"}]
+}
