@@ -73,3 +73,9 @@ def test_invalid_model_severity_keeps_alert_severity(make_agent):
     result = make_agent(engine=FakeEngine(decision)).triage(DISK)
     assert result.severity == Severity.high
     assert any("invalid severity" in n for n in result.guardrail_notes)
+
+
+def test_triage_result_json_roundtrip(make_agent):
+    result = make_agent().triage(DISK)
+    again = type(result).model_validate_json(result.model_dump_json())
+    assert again == result

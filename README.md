@@ -9,7 +9,7 @@
 An LLM agent that does **first-level triage of monitoring and security alerts** (Zabbix, Wazuh)
 for a managed IT services team. It retrieves the right runbook with **hybrid RAG**, asks a model
 for a structured decision, and then **enforces guardrails in code**. Sensitive actions always go
-to a human for approval, on Telegram or through the API.
+to a human for approval: Telegram notifies, and a named approver decides through the API.
 
 This is a clean-room, open-source version of the pattern I run in production at
 [VNC TEC](https://vnctec.com.br), where AI agents triage SOC and NOC alerts for 50+ client servers
@@ -40,6 +40,7 @@ Zabbix / Wazuh webhook
 | **Deterministic fallback engine** | If the model times out or returns invalid JSON, a rule-based engine built from runbook metadata answers instead. Triage degrades but never goes dark. |
 | **Alert text is untrusted input** | Alert payloads are wrapped as data and the system prompt tells the model to ignore instructions inside them. The eval set includes a prompt-injection case. |
 | **The agent never executes** | Approved actions are handed to the RMM or automation platform that already holds credentials. The agent has no write access to client systems. |
+| **Approvals are attributable** | Each approver has a personal token. The name in the audit trail comes from the token, not from the request body, and decisions lock the row in Postgres so two people cannot approve the same action twice. |
 | **Provider-agnostic** | Anthropic Messages API or any OpenAI-compatible endpoint (OpenAI, Azure OpenAI, Ollama, vLLM). Embeddings work the same way, with an offline hashing embedder for CI. |
 
 ## Evals
@@ -57,7 +58,9 @@ It **fails the build** when a metric drops below its threshold.
 | unknown alerts escalated | 1.00 | 1.00 |
 | approval guardrail respected | 1.00 | 1.00 |
 
-The dataset is small (21 cases) and synthetic: it is a regression gate, not a benchmark. To run
+The dataset is small (22 cases) and synthetic: it is a regression gate, not a benchmark. One case
+came from the Kubernetes smoke test: a short Wazuh alert that the first ranking formula sent to
+the wrong runbook. It is now in the set so the bug cannot come back. To run
 the same suite against a real model:
 
 ```bash
@@ -90,10 +93,14 @@ Interactive API docs: `http://localhost:8080/docs`.
 | POST | `/alerts` | Generic, already-normalized alert |
 | GET | `/triage/{id}` | Triage result with citations and guardrail notes |
 | GET | `/approvals` | Actions waiting for a human |
-| POST | `/approvals/{id}` | Approve or reject an action (audited) |
+| POST | `/approvals/{id}` | Approve or reject an action. Needs `X-Approver-Token` |
+| GET | `/audit` | Who approved or rejected what, and when |
 | GET | `/healthz`, `/readyz` | Probes |
 
-Webhooks are authenticated with a shared secret in the `X-API-Key` header (constant-time compare).
+Webhooks are authenticated with a shared secret in the `X-API-Key` header. Approvals also need a
+personal token (`APPROVER_TOKENS="alice:token,bob:token"`); approvals are disabled when it is
+empty. Tokens are compared in constant time. With `DATABASE_URL` set, triage results and the audit
+trail live in Postgres and survive restarts; without it, everything stays in memory (single replica).
 
 ## Deploy
 
@@ -113,13 +120,26 @@ helm upgrade --install triage deploy/helm/triage-agent --set ingress.enabled=tru
 
 ## CI
 
-GitHub Actions runs:
-1. ruff lint and format
-2. unit tests plus a **pgvector integration test** against a service container
+GitHub Actions runs on every push and pull request:
+1. ruff lint and format, with dependencies installed from `uv.lock`
+2. unit tests plus **Postgres/pgvector integration tests** against a service container
 3. evals with thresholds, with the report published in the job summary
-4. `terraform fmt`/`validate`
-5. `helm lint`/`template`
-6. image build, pushed to GHCR on `main`
+4. `pip-audit` on the locked runtime dependencies
+5. `terraform fmt`/`validate`, `helm lint`/`template`
+6. **end-to-end on Kubernetes**: a kind cluster with Postgres, the Helm chart with 2 replicas,
+   and `scripts/smoke.py` through the Service (webhooks, auth, approvals, audit)
+7. Trivy image scan (fails on fixable HIGH/CRITICAL), then push to GHCR on `main`
+
+Actions are pinned by commit SHA and Dependabot keeps Python, Actions and Docker updated.
+See [SECURITY.md](SECURITY.md) for the security model.
+
+Run the same checks locally:
+
+```bash
+pytest && triage-evals
+docker compose up -d --build && python scripts/smoke.py http://localhost:8080 change-me change-me-approver-token
+./scripts/e2e-kind.sh   # needs kind, kubectl and helm
+```
 
 ## Project layout
 
@@ -129,19 +149,22 @@ src/triage/
   retrieval/          chunking, BM25, embeddings, vector stores (memory, pgvector), RRF fusion
   llm.py, prompts.py  decision engines (Anthropic, OpenAI-compatible, rule-based)
   agent.py            retrieve -> decide -> enforce guardrails
-  approvals.py        approval queue, audit trail, Telegram notifier
+  approvals.py        repositories (memory, Postgres), approver tokens, audit trail, Telegram
+  db.py               advisory lock so replicas do not race on schema setup
   api.py              FastAPI app
   evals.py            evaluation harness with thresholds
 runbooks/             Markdown runbooks with YAML front matter (actions + approval flags)
 evals/                labelled dataset and latest report
 deploy/helm/          Helm chart
+deploy/e2e/           test-only Postgres for the kind job
+scripts/              smoke test and kind end-to-end script
 infra/terraform/aws/  VPC + k3s node, SSM access
 ```
 
 ## Roadmap
 
-- Persist triage results and the audit trail in Postgres (the interface is already isolated).
-- Telegram inline buttons for one-tap approval.
+- Telegram inline buttons for one-tap approval (today Telegram only notifies).
+- Signed webhooks or mTLS instead of a shared API key.
 - Correlation window: group alerts from the same site before triage (one VPN outage should not
   produce 12 tickets).
 - LLM-as-judge evals for summary quality, alongside the deterministic metrics.

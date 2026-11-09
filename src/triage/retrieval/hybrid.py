@@ -36,14 +36,23 @@ class HybridRetriever:
         return [Hit(chunk=by_id[cid], score=score) for cid, score in ordered]
 
     def rank_runbooks(self, query: str, k: int = 3) -> list[tuple[str, float, list[Hit]]]:
-        """Aggregate chunk hits per runbook (sum of fused scores), best first."""
+        """Aggregate chunk hits per runbook, best first.
+
+        Score = best chunk + 25% of the remaining chunks. A plain sum favours long runbooks
+        with many weak matches (a generic word like "event" hits every section).
+        """
         hits = self.search(query, k=self.candidates)
         grouped: dict[str, list[Hit]] = {}
         for hit in hits:
             grouped.setdefault(hit.chunk.runbook_id, []).append(hit)
         ranked = sorted(
-            ((rb, sum(h.score for h in hs), hs) for rb, hs in grouped.items()),
+            ((rb, self._aggregate(hs), hs) for rb, hs in grouped.items()),
             key=lambda t: t[1],
             reverse=True,
         )
         return ranked[:k]
+
+    @staticmethod
+    def _aggregate(hits: list[Hit]) -> float:
+        scores = sorted((h.score for h in hits), reverse=True)
+        return scores[0] + 0.25 * sum(scores[1:])

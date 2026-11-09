@@ -136,6 +136,11 @@ class TriageResult(BaseModel):
     engine: str
     guardrail_notes: list[str] = Field(default_factory=list)
 
+    @field_validator("severity", mode="before")
+    @classmethod
+    def _sev(cls, v: object) -> Severity:
+        return Severity.parse(v)  # type: ignore[arg-type]
+
     @field_serializer("severity")
     def _sev_out(self, v: Severity) -> str:
         return v.name

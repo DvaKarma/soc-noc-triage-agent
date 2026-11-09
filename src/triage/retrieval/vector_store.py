@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from ..db import schema_lock
 from ..models import Chunk, Hit
 from .embeddings import Embedder
 
@@ -39,15 +40,16 @@ class PgVectorStore:
         self.embedder = embedder
         self.table = table
         self.conn = psycopg.connect(dsn, autocommit=True)
-        self.conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
-        self.conn.execute(
-            f"""CREATE TABLE IF NOT EXISTS {table} (
-                id text PRIMARY KEY, runbook_id text NOT NULL, heading text NOT NULL,
-                content text NOT NULL, embedding vector({embedder.dim}) NOT NULL)"""
-        )
-        self.conn.execute(
-            f"CREATE INDEX IF NOT EXISTS {table}_hnsw ON {table} USING hnsw (embedding vector_cosine_ops)"
-        )
+        with schema_lock(self.conn):
+            self.conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            self.conn.execute(
+                f"""CREATE TABLE IF NOT EXISTS {table} (
+                    id text PRIMARY KEY, runbook_id text NOT NULL, heading text NOT NULL,
+                    content text NOT NULL, embedding vector({embedder.dim}) NOT NULL)"""
+            )
+            self.conn.execute(
+                f"CREATE INDEX IF NOT EXISTS {table}_hnsw ON {table} USING hnsw (embedding vector_cosine_ops)"
+            )
 
     @staticmethod
     def _literal(vec: list[float]) -> str:
@@ -55,7 +57,7 @@ class PgVectorStore:
 
     def add(self, chunks: list[Chunk]) -> None:
         vectors = self.embedder.embed([c.text for c in chunks])
-        with self.conn.cursor() as cur:
+        with schema_lock(self.conn), self.conn.cursor() as cur:
             for chunk, vec in zip(chunks, vectors, strict=True):
                 cur.execute(
                     f"""INSERT INTO {self.table} (id, runbook_id, heading, content, embedding)

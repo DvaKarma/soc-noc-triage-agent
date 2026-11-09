@@ -9,7 +9,7 @@
 Agente de IA que faz a **primeira triagem de alertas de monitoramento e segurança** (Zabbix e
 Wazuh) para uma equipe de TI gerenciada. Ele encontra o runbook certo com **RAG híbrido**, pede
 ao modelo uma decisão estruturada e depois **aplica as travas de segurança em código**. Ação
-sensível sempre vai para aprovação humana, pelo Telegram ou pela API.
+sensível sempre vai para aprovação humana: o Telegram avisa e um aprovador identificado decide pela API.
 
 É uma versão aberta, escrita do zero, do padrão que opero em produção na
 [VNC TEC](https://vnctec.com.br), onde agentes de IA fazem a triagem dos alertas de SOC e NOC de
@@ -41,6 +41,7 @@ Webhook do Zabbix / Wazuh
 | **Motor determinístico de contingência** | Se o modelo cair ou devolver JSON inválido, um motor baseado nas regras dos runbooks responde no lugar. A triagem perde qualidade, mas não para. |
 | **Texto do alerta é entrada não confiável** | O conteúdo do alerta vai para o modelo marcado como dado, e o prompt manda ignorar instruções dentro dele. O conjunto de avaliação tem um caso de prompt injection. |
 | **O agente nunca executa nada** | Ação aprovada é entregue à ferramenta de RMM ou automação que já tem as credenciais. O agente não tem acesso de escrita aos sistemas dos clientes. |
+| **Toda aprovação tem dono** | Cada aprovador tem um token pessoal. O nome na trilha de auditoria vem do token, não do que foi enviado na requisição, e a decisão trava a linha no Postgres para que duas pessoas não aprovem a mesma ação duas vezes. |
 | **Independente de fornecedor** | API da Anthropic ou qualquer endpoint compatível com OpenAI (OpenAI, Azure OpenAI, Ollama, vLLM). Os embeddings também, com um embedder offline para o CI. |
 
 ## Avaliações
@@ -58,7 +59,9 @@ tentativa de prompt injection. Se uma métrica cai abaixo do limite, **o build f
 | alertas desconhecidos escalados | 1.00 | 1.00 |
 | trava de aprovação respeitada | 1.00 | 1.00 |
 
-O conjunto é pequeno (21 casos) e sintético: serve para barrar regressão, não como benchmark.
+O conjunto é pequeno (22 casos) e sintético: serve para barrar regressão, não como benchmark. Um
+dos casos veio do teste no Kubernetes: um alerta curto do Wazuh que a primeira fórmula de
+ranking mandava para o runbook errado. Ele entrou no conjunto para o erro não voltar.
 Para rodar a mesma bateria contra um modelo real:
 
 ```bash
@@ -91,11 +94,14 @@ A documentação interativa da API fica em `http://localhost:8080/docs`.
 | POST | `/alerts` | Alerta genérico já normalizado |
 | GET | `/triage/{id}` | Resultado da triagem com citações e notas das travas |
 | GET | `/approvals` | Ações aguardando uma pessoa |
-| POST | `/approvals/{id}` | Aprovar ou rejeitar uma ação (fica registrado) |
+| POST | `/approvals/{id}` | Aprovar ou rejeitar uma ação. Exige `X-Approver-Token` |
+| GET | `/audit` | Quem aprovou ou rejeitou o quê, e quando |
 | GET | `/healthz`, `/readyz` | Verificações de saúde |
 
-Os webhooks são autenticados por um segredo compartilhado no cabeçalho `X-API-Key`, comparado
-em tempo constante.
+Os webhooks são autenticados por um segredo compartilhado no cabeçalho `X-API-Key`. Aprovar exige
+também um token pessoal (`APPROVER_TOKENS="alice:token,bob:token"`); sem ele as aprovações ficam
+desligadas. Os tokens são comparados em tempo constante. Com `DATABASE_URL`, triagens e trilha de
+auditoria ficam no Postgres e sobrevivem a reinícios; sem ele, tudo fica em memória (uma réplica só).
 
 ## Deploy
 
@@ -115,13 +121,26 @@ helm upgrade --install triage deploy/helm/triage-agent --set ingress.enabled=tru
 
 ## CI
 
-O GitHub Actions roda:
-1. lint e formatação com ruff
-2. testes unitários e um **teste de integração com pgvector** num container de serviço
+O GitHub Actions roda a cada push e pull request:
+1. lint e formatação com ruff, com dependências instaladas do `uv.lock`
+2. testes unitários e **testes de integração com Postgres/pgvector** num container de serviço
 3. avaliações com limite mínimo, com o relatório publicado no resumo do job
-4. `terraform fmt`/`validate`
-5. `helm lint`/`template`
-6. build da imagem, publicada no GHCR a cada push na `main`
+4. `pip-audit` nas dependências travadas
+5. `terraform fmt`/`validate`, `helm lint`/`template`
+6. **teste ponta a ponta no Kubernetes**: cluster kind com Postgres, chart Helm com 2 réplicas e
+   `scripts/smoke.py` passando pelo Service (webhooks, autenticação, aprovações, auditoria)
+7. varredura da imagem com Trivy (falha em HIGH/CRITICAL com correção disponível) e push no GHCR na `main`
+
+As actions são fixadas por SHA do commit e o Dependabot mantém Python, Actions e Docker
+atualizados. O modelo de segurança está em [SECURITY.md](SECURITY.md).
+
+Para rodar as mesmas verificações na sua máquina:
+
+```bash
+pytest && triage-evals
+docker compose up -d --build && python scripts/smoke.py http://localhost:8080 change-me change-me-approver-token
+./scripts/e2e-kind.sh   # precisa de kind, kubectl e helm
+```
 
 ## Estrutura
 
@@ -131,19 +150,22 @@ src/triage/
   retrieval/          divisão em trechos, BM25, embeddings, bancos vetoriais (memória, pgvector), fusão RRF
   llm.py, prompts.py  motores de decisão (Anthropic, compatível com OpenAI, regras)
   agent.py            buscar -> decidir -> aplicar travas
-  approvals.py        fila de aprovação, trilha de auditoria, aviso no Telegram
+  approvals.py        repositórios (memória, Postgres), tokens de aprovador, auditoria, Telegram
+  db.py               trava consultiva para as réplicas não disputarem a criação do schema
   api.py              aplicação FastAPI
   evals.py            avaliações com limite mínimo
 runbooks/             runbooks em Markdown com cabeçalho YAML (ações e flags de aprovação)
 evals/                conjunto rotulado e último relatório
 deploy/helm/          chart Helm
+deploy/e2e/           Postgres só para o teste no kind
+scripts/              smoke test e script ponta a ponta no kind
 infra/terraform/aws/  VPC + nó k3s, acesso por SSM
 ```
 
 ## Próximos passos
 
-- Guardar triagens e trilha de auditoria no Postgres (a interface já está isolada).
-- Botões no Telegram para aprovar com um toque.
+- Botões no Telegram para aprovar com um toque (hoje o Telegram só avisa).
+- Webhooks assinados ou mTLS no lugar da chave compartilhada.
 - Janela de correlação: agrupar alertas do mesmo site antes da triagem (uma queda de VPN não
   deveria gerar 12 chamados).
 - Avaliação da qualidade do resumo com um modelo como juiz, junto das métricas determinísticas.

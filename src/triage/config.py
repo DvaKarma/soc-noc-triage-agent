@@ -8,6 +8,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from .agent import TriageAgent
+from .approvals import InMemoryTriageRepository, PostgresTriageRepository, TriageRepository
 from .llm import AnthropicBackend, ChatEngine, DecisionEngine, OpenAICompatibleBackend, RuleBasedEngine
 from .retrieval import HybridRetriever, load_runbooks
 from .retrieval.embeddings import Embedder, HashingEmbedder, OpenAICompatibleEmbedder
@@ -25,6 +26,7 @@ class Settings(BaseModel):
     embeddings_dim: int = 384
     database_url: str = ""
     api_key: str = ""
+    approver_tokens: str = ""  # "alice:long-random-token,bob:another-token"
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     min_confidence: float = 0.55
@@ -62,3 +64,7 @@ def build_agent(s: Settings) -> TriageAgent:
         engine=build_engine(s),
         min_confidence=s.min_confidence,
     )
+
+
+def build_repository(s: Settings) -> TriageRepository:
+    return PostgresTriageRepository(s.database_url) if s.database_url else InMemoryTriageRepository()

@@ -3,6 +3,8 @@ image:
   tag: latest
   pullPolicy: IfNotPresent
 
+# More than one replica requires DATABASE_URL in the secret (shared Postgres).
+# Without it each pod keeps its own in-memory state.
 replicaCount: 2
 
 config:
@@ -12,7 +14,7 @@ config:
   EMBEDDINGS_DIM: "384"
   MIN_CONFIDENCE: "0.55"
 
-# Name of an existing Secret with API_KEY, LLM_API_KEY, DATABASE_URL, TELEGRAM_* keys.
+# Name of an existing Secret with API_KEY, APPROVER_TOKENS, DATABASE_URL, LLM_API_KEY, TELEGRAM_* keys.
 # Create it out of band (External Secrets, Sealed Secrets, Infisical operator...).
 existingSecret: triage-agent-secrets
 
